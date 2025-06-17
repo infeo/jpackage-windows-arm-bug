@@ -1,0 +1,101 @@
+name: Build Windows Installer
+
+on:
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-msi:
+    name: Build .msi Installer
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - arch: x64
+            os: windows-latest
+            java-dist: 'zulu'
+            java-version: '24.0.1+9'
+            java-package: 'jdk'
+          - arch: arm64
+            os: windows-11-arm
+            java-dist: 'liberica'
+            java-version: '24.0.1+11'
+            java-package: 'jdk'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: ${{ matrix.java-dist }}
+          java-version: ${{ matrix.java-version }}
+          java-package: ${{ matrix.java-package }}
+          check-latest: true
+          cache: 'maven'
+      - name: Install wix and extensions
+        run: |
+          dotnet tool install --global wix --version 6.0.0
+          wix.exe extension add WixToolset.UI.wixext/6.0.0 --global
+          wix.exe extension add WixToolset.Util.wixext/6.0.0 --global
+      - name: Run maven
+        run: ./mvnw -B verify
+      - name: Patch target dir
+        run: |
+          mkdir target/mods
+          cp target/jpackage-arm-bug-*.jar target/mods
+      - name: Run jlink with help option
+        id: jep-493-check
+        run: |
+          if ! $(${JAVA_HOME}/bin/jlink --help | grep -q "Linking from run-time image enabled"); then
+            echo "jdk-with-mods=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "jdk-with-mods=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Run jlink
+        if: steps.jep-493-check.outputs.jdk-with-mods
+        run: >
+          ${JAVA_HOME}/bin/jlink
+          --verbose
+          --output target/runtime
+          --module-path "${JAVA_HOME}/jmods"
+          --add-modules java.base
+          --strip-native-commands
+          --no-header-files
+          --no-man-pages
+          --strip-debug
+          --compress zip-0
+      - name: Run jlink without modules
+        if: ${{ ! steps.jep-493-check.outputs.jdk-with-mods }}
+        run: >
+          ${JAVA_HOME}/bin/jlink
+          --verbose
+          --output target/runtime
+          --add-modules java.base
+          --strip-native-commands
+          --no-header-files
+          --no-man-pages
+          --strip-debug
+          --compress zip-0
+      - name: Create MSI
+        run: >
+          ${JAVA_HOME}/bin/jpackage
+          --verbose
+          --type msi
+          --runtime-image target/runtime
+          --module-path target/mods
+          --module org.example.jpackageArmBug/org.example.App
+          --win-upgrade-uuid "9ed8bc06-620b-465b-91be-219c0d7f12a5"
+          --dest target/installer
+          --name "ExampleApp"
+          --vendor "ExampleVendor"
+          --copyright "2025"
+          --app-version "1.0.0"
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: msi-${{ matrix.arch }}
+          path: |
+            target/installer/ExampleApp-*.msi
+          if-no-files-found: error
